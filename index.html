@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NO SATURACIÓN PRO</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+</head>
+<body>
+<div class="layout">
+<div class="ov" id="ov" onclick="sbClose()"></div>
+
+<!-- SIDEBAR -->
+<aside class="sidebar" id="sb">
+  <div class="sb-logo">
+    <div class="sb-tag">ESTRATÉGICO PRO</div>
+    <div class="sb-name">NO<br>SATURACIÓN</div>
+    <div class="sb-sub">Sistema en vivo</div>
+  </div>
+  <nav class="sb-nav">
+    <div class="sb-grp">Principal</div>
+    <div class="ni active" onclick="go('senal',this)">
+      <span class="ni-ico">⚡</span><span class="ni-lbl">Señal de Entrada</span>
+      <span class="ni-badge nd" id="badge">—</span>
+    </div>
+    <div class="sb-grp">Análisis</div>
+    <div class="ni" onclick="go('frecuencias',this)"><span class="ni-ico">📊</span><span class="ni-lbl">Frecuencias</span></div>
+    <div class="ni" onclick="go('ciclos',this)"><span class="ni-ico">↺</span><span class="ni-lbl">Ciclos</span></div>
+    <div class="ni" onclick="go('diferencias',this)"><span class="ni-ico">△</span><span class="ni-lbl">Diferencias</span></div>
+    <div class="ni" onclick="go('porcentajes',this)"><span class="ni-ico">%</span><span class="ni-lbl">Porcentajes</span></div>
+    <div class="sb-grp">Herramientas</div>
+    <div class="ni" onclick="go('historial',this)"><span class="ni-ico">📋</span><span class="ni-lbl">Historial</span><span class="ni-badge nd" id="badge-hist">0</span></div>
+    <div class="ni" onclick="go('tablero',this)"><span class="ni-ico">▦</span><span class="ni-lbl">Tablero</span></div>
+    <div class="ni" onclick="go('grafica',this)"><span class="ni-ico">〜</span><span class="ni-lbl">Gráfica</span></div>
+    <div class="ni" onclick="go('martingala',this)"><span class="ni-ico">↑↑</span><span class="ni-lbl">Martingala</span></div>
+  </nav>
+  <div class="sb-foot" style="display:flex;flex-direction:column;gap:8px">
+    <div><span class="sb-dot"></span><span id="sbcnt" style="font-family:var(--fm);font-size:11px;color:var(--t2)">0 tiradas</span></div>
+    <button class="btn btn-reiniciar" onclick="reiniciar()" style="width:100%;justify-content:center;padding:8px 0;border-radius:8px;font-size:12px">↺ Reiniciar todo</button>
+  </div>
+</aside>
+
+<!-- MAIN -->
+<div class="main">
+  <!-- INPUT BAR -->
+  <div class="ibar">
+    <button class="mbtn" onclick="sbOpen()">☰</button>
+    <span class="ibar-lbl">Número:</span>
+    <input type="number" id="NI" class="num-inp" min="0" max="36" placeholder="0–36" autocomplete="off"
+      onkeydown="if(event.key==='Enter'){addN();event.preventDefault()}">
+    <button class="btn btn-add" onclick="addN()">↵ Ingresar</button>
+    <button class="btn btn-undo" onclick="undo()" title="Deshacer">↩</button>
+    <input type="text" id="PI" class="paste-inp" placeholder="3,15,0,22,7..." title="Pegar lista">
+    <button class="btn btn-paste" onclick="paste()">📋 Cargar</button>
+    <button class="btn btn-clear" onclick="clearAll()">✕</button>
+    <div class="ibar-count" id="cnt">0 tiradas</div>
+  </div>
+  <!-- STRIP -->
+  <div class="strip" id="strip"><span class="strip-empty">Ingresa los números de la ruleta...</span></div>
+  <!-- PAGES -->
+  <div class="area">
+    <div class="page active" id="page-senal">
+      <div class="ph"><div class="ph-crumb">NO SATURACIÓN PRO · Señal de Entrada</div>
+        <div class="ph-title">Señal de Entrada</div>
+        <div class="ph-sub">Decisión calculada en tiempo real según los números ingresados</div></div>
+      <div id="c-senal"><div style="text-align:center;padding:60px 20px;color:var(--t3)">
+        <div style="font-size:48px;margin-bottom:14px;opacity:.35">⚡</div>
+        <div style="font-size:14px">Ingresa los números que van saliendo en la ruleta</div>
+        <div style="font-size:11px;margin-top:6px;font-family:var(--fm)">La señal aparece desde el primer número</div>
+      </div></div>
+    </div>
+    <div class="page" id="page-frecuencias">
+      <div class="ph"><div class="ph-crumb">NO SATURACIÓN PRO · Frecuencias</div>
+        <div class="ph-title">Frecuencias</div>
+        <div class="ph-sub">Hits por docena en ventanas 10 / 20 / 30 / 50 tiros</div></div>
+      <div id="c-frecuencias"></div>
+    </div>
+    <div class="page" id="page-ciclos">
+      <div class="ph"><div class="ph-crumb">NO SATURACIÓN PRO · Ciclos</div>
+        <div class="ph-title">Ciclos</div>
+        <div class="ph-sub">C1 · C2 · C3 por docena · Fórmulas FOR BES del Excel</div></div>
+      <div id="c-ciclos"></div>
+    </div>
+    <div class="page" id="page-diferencias">
+      <div class="ph"><div class="ph-crumb">NO SATURACIÓN PRO · Diferencias</div>
+        <div class="ph-title">Diferencias</div>
+        <div class="ph-sub">ALT-MED / ALT-BAJ / MED-BAJ · ÓPTIMA / MEDIA / SATURACIÓN</div></div>
+      <div id="c-diferencias"></div>
+    </div>
+    <div class="page" id="page-porcentajes">
+      <div class="ph"><div class="ph-crumb">NO SATURACIÓN PRO · Porcentajes</div>
+        <div class="ph-title">Porcentajes</div>
+        <div class="ph-sub">% por docena · Suma Alta+Media · Señales de entrada</div></div>
+      <div id="c-porcentajes"></div>
+    </div>
+    <div class="page" id="page-tablero">
+      <div class="ph"><div class="ph-crumb">NO SATURACIÓN PRO · Tablero</div>
+        <div class="ph-title">Tablero</div>
+        <div class="ph-sub">Clic en número para registrarlo · Calor por frecuencia</div></div>
+      <div id="c-tablero"></div>
+    </div>
+    <div class="page" id="page-grafica">
+      <div class="ph"><div class="ph-crumb">NO SATURACIÓN PRO · Gráfica</div>
+        <div class="ph-title">Gráfica</div>
+        <div class="ph-sub">Evolución de frecuencias a lo largo de las tiradas</div></div>
+      <div id="c-grafica"></div>
+    </div>
+    <div class="page" id="page-martingala">
+      <div class="ph"><div class="ph-crumb">NO SATURACIÓN PRO · Martingala</div>
+        <div class="ph-title">Martingala</div>
+        <div class="ph-sub">Frenos del Excel · Calculadora en tiempo real</div></div>
+      <div id="c-martingala"></div>
+    </div>
+    <div class="page" id="page-historial">
+      <div class="ph"><div class="ph-crumb">NO SATURACIÓN PRO · Historial</div>
+        <div class="ph-title">Historial de Tiros</div>
+        <div class="ph-sub">Registra el resultado de cada tiro: ganado o perdido</div></div>
+      <div id="c-historial"></div>
+    </div>
+  </div>
+</div>
+</div>
+
+<div class="toast" id="toast"><div class="toast-t" id="tt">⚡</div><div class="toast-b" id="tb"></div></div>
+
+</body>
+<script src="script.js"></script>
+</html>
