@@ -58,29 +58,222 @@ function sAus(a){return a<=2?{t:'OK',c:'entry'}:a<=4?{t:'ESP 3-4',c:'esperar'}:a
 function sig(s){return`<span class="sig ${s.c}">${s.t}</span>`}
 function eCls(e){return{CRECIENTE:'entry',EXPLOSION:'entry',REACTIVACION:'esperar',ESTABLE:'esperar',DECRECIENTE:'noentry',PELIGROSO:'noentry',NORMAL:'nd','SIN DATOS':'nd'}[e]||'nd'}
 
-function decision(b){
-  if(!b||b.nivel===0)return{dec:'SIN DATOS',cls:'nd',ico:'◈',sub:'Ingresa números para comenzar',reasons:[]};
-  if(b.saturada)return{dec:'NO ENTRY',cls:'noentry',ico:'⛔',sub:`D${b.iA+1} saturada (${(b.p50[b.iA]*100).toFixed(0)}%)`,reasons:[{t:'Saturación detectada',ok:false}]};
-  let ok=0,no=0,esp=0,reasons=[];
-  // Suma AM
-  const ss=sSuma(b.sumaAM);
-  ss.c==='entry'?(ok++,reasons.push({t:`Suma A+M ${(b.sumaAM*100).toFixed(0)}%`,ok:true})):(no++,reasons.push({t:`Suma A+M ${(b.sumaAM*100).toFixed(0)}%`,ok:false}));
-  // % baja
-  b.p50[b.iB]<=0.26?(ok++,reasons.push({t:`%Baja ${(b.p50[b.iB]*100).toFixed(0)}% (<26%)`,ok:true})):(no++,reasons.push({t:`%Baja ${(b.p50[b.iB]*100).toFixed(0)}% (≥26%)`,ok:false}));
-  // 10 sal alta
-  const sa=b.f10[b.iA];
-  sa>5?(no++,reasons.push({t:`10T Alta: ${sa} (>5)`,ok:false})):sa>=3?(ok++,reasons.push({t:`10T Alta: ${sa} (3-5)`,ok:true})):(esp++,reasons.push({t:`10T Alta: ${sa} (bajo)`,ok:null}));
-  // Dif AM50
-  const sd=sDif(b.difAM50);
-  sd.c==='optima'?(ok++,reasons.push({t:`Dif AM50: ${b.difAM50} Óptima`,ok:true})):sd.c==='media'?(esp++,reasons.push({t:`Dif AM50: ${b.difAM50} Media`,ok:null})):(no++,reasons.push({t:`Dif AM50: ${b.difAM50} Sat`,ok:false}));
-  // Ciclo docena media
-  if(b.nivel>=3){const ci=b.ciclos[b.iM];
-    ['EXPLOSION','CRECIENTE','REACTIVACION'].includes(ci.estado)?(ok++,reasons.push({t:`Ciclo D${b.iM+1}: ${ci.estado}`,ok:true})):['PELIGROSO','DECRECIENTE'].includes(ci.estado)?(no++,reasons.push({t:`Ciclo D${b.iM+1}: ${ci.estado}`,ok:false})):(esp++,reasons.push({t:`Ciclo D${b.iM+1}: ${ci.estado}`,ok:null}));}
-  let dec,cls,ico;
-  if(no>=3||(no>ok&&no>=2)){dec='NO ENTRY';cls='noentry';ico='⛔';}
-  else if(ok>=3&&no<=1){dec='ENTRY';cls='entry';ico='✅';}
-  else{dec='ESPERAR';cls='esperar';ico='⏳';}
-  return{dec,cls,ico,sub:`${ok} ✓ · ${no} ✗ · ${esp} ~`,reasons};
+// ════════════════════════════════════════════════════════════
+// MOTOR DE DECISIÓN — LÓGICA EXACTA DEL EXCEL ORIGINAL
+// ════════════════════════════════════════════════════════════
+// El Excel clasifica cada docena en 4 ESTADOS base:
+//   IDEAL      → ausencia ≤2, porcentaje ENTRY (20-34%)
+//   SANA       → ausencia 3-5, porcentaje OK
+//   ADVERTENCIA→ ausencia 6-10 o porcentaje CUIDADO
+//   PELIGRO    → saturada, ausencia >10, o porcentaje >42%
+//
+// Luego cruza con el ESTADO DE CICLO de esa docena:
+//   EXPLOSION, CRECIENTE, REACTIVACION, ESTABLE, DECRECIENTE, PELIGROSO
+//
+// Prioridad de combinaciones (del usuario + Excel):
+//   1. IDEAL+EXPLOSION       → ENTRY 🔥
+//   2. IDEAL+CRECIENTE       → ENTRY 🔥
+//   3. SANA+EXPLOSION        → ENTRY ✅
+//   4. IDEAL+REACTIVACION    → ENTRY ✅
+//   5. SANA+CRECIENTE        → ENTRY ✅
+//   6. SANA+REACTIVACION     → ENTRY ✅
+//   7. IDEAL+ESTABLE         → ENTRY ✅
+//   8. SANA+ESTABLE          → ESPERAR ⏳
+//   9. ADVERTENCIA+CRECIENTE → ESPERAR ⏳
+//  10. ADVERTENCIA+REACTIVACION → ESPERAR ⏳
+//  Todo lo demás             → NO ENTRY ⛔
+//
+// Prioridad de ciclos para elegir la combo:
+//   C1+C2+C3 > C1+C2 > C2+C3
+// ════════════════════════════════════════════════════════════
+
+// Modos: '2docenas' | '1docena'
+let modoJuego = '2docenas';
+
+const PRIORIDAD_COMBOS = [
+  {estado:'IDEAL',   ciclo:'EXPLOSION',    rank:1,  dec:'ENTRY',    cls:'entry',   ico:'🔥', forBES:'R1 · ENTRAR INMEDIATO'},
+  {estado:'IDEAL',   ciclo:'CRECIENTE',    rank:2,  dec:'ENTRY',    cls:'entry',   ico:'🔥', forBES:'R1 · ENTRAR'},
+  {estado:'SANA',    ciclo:'EXPLOSION',    rank:3,  dec:'ENTRY',    cls:'entry',   ico:'✅', forBES:'R2 · ENTRAR'},
+  {estado:'IDEAL',   ciclo:'REACTIVACION', rank:4,  dec:'ENTRY',    cls:'entry',   ico:'✅', forBES:'R2 · ENTRAR'},
+  {estado:'SANA',    ciclo:'CRECIENTE',    rank:5,  dec:'ENTRY',    cls:'entry',   ico:'✅', forBES:'R2 · ENTRAR'},
+  {estado:'SANA',    ciclo:'REACTIVACION', rank:6,  dec:'ENTRY',    cls:'entry',   ico:'✅', forBES:'R2 · ENTRAR'},
+  {estado:'IDEAL',   ciclo:'ESTABLE',      rank:7,  dec:'ENTRY',    cls:'entry',   ico:'✅', forBES:'R2 · ENTRAR'},
+  {estado:'SANA',    ciclo:'ESTABLE',      rank:8,  dec:'ESPERAR',  cls:'esperar', ico:'⏳', forBES:'R3 · ESPERAR'},
+  {estado:'ADVERTENCIA', ciclo:'CRECIENTE',rank:9,  dec:'ESPERAR',  cls:'esperar', ico:'⏳', forBES:'R3 · ESPERAR'},
+  {estado:'ADVERTENCIA', ciclo:'REACTIVACION',rank:10,dec:'ESPERAR',cls:'esperar', ico:'⏳', forBES:'R3 · ESPERAR'},
+];
+
+function estadoBase(b, di) {
+  // Clasifica la docena en IDEAL / SANA / ADVERTENCIA / PELIGRO
+  const p50 = b.p50[di];
+  const aus = b.v50 - b.f50[di];
+  const ratio = b.v50 > 0 ? 50 / b.v50 : 1;
+  const ausNorm = Math.round(aus * ratio);
+  const pNorm   = b.v50 > 0 ? b.f50[di] / b.v50 : 0;
+
+  // PELIGRO: saturada (>44%) o ausencia muy alta
+  if(pNorm > 0.44 || ausNorm > 10) return 'PELIGRO';
+  // IDEAL: porcentaje 20-34% (≤2 separados en Excel) Y ausencia ≤2
+  if(pNorm >= 0.20 && pNorm <= 0.34 && ausNorm <= 2) return 'IDEAL';
+  // SANA: porcentaje 20-40% Y ausencia 3-5
+  if(pNorm >= 0.20 && pNorm <= 0.40 && ausNorm <= 5) return 'SANA';
+  // ADVERTENCIA: el resto dentro de rangos aceptables
+  if(pNorm < 0.44) return 'ADVERTENCIA';
+  return 'PELIGRO';
+}
+
+function comboCiclo(ci) {
+  // Estandariza el estado del ciclo para buscar en la tabla de prioridades
+  const map = {
+    'EXPLOSION':'EXPLOSION','CRECIENTE':'CRECIENTE','REACTIVACION':'REACTIVACION',
+    'ESTABLE':'ESTABLE','DECRECIENTE':'DECRECIENTE','PELIGROSO':'PELIGROSO',
+    'NORMAL':'ESTABLE','SIN DATOS':'DECRECIENTE'
+  };
+  return map[ci.estado] || 'DECRECIENTE';
+}
+
+function buscarCombo(estadoB, estadoC) {
+  return PRIORIDAD_COMBOS.find(p => p.estado === estadoB && p.ciclo === estadoC) || null;
+}
+
+// Evaluación de CICLOS para una docena — respeta prioridad C1+C2+C3 > C1+C2 > C2+C3
+function evaluarCiclosPorDocena(b, di) {
+  const ci = b.ciclos[di];
+  // El ciclo ya está calculado sobre las últimas 30 con tercios
+  // Ciclo preferido según prioridad del Excel: C1+C2+C3 primero
+  const c1 = ci.c1, c2 = ci.c2, c3 = ci.c3;
+
+  // Estado "global" del ciclo (ya calculado en calcCiclo)
+  const estadoCiclo = comboCiclo(ci);
+
+  // Combinación activa según prioridad
+  let combActiva, razonCiclo;
+  if(c1 > 0 && c2 > 0 && c3 > 0) {
+    combActiva = 'C1+C2+C3';
+    razonCiclo = `${combActiva}: ${c1}/${c2}/${c3}`;
+  } else if(c1 > 0 && c2 > 0) {
+    combActiva = 'C1+C2';
+    razonCiclo = `${combActiva}: ${c1}/${c2}`;
+  } else if(c2 > 0 && c3 > 0) {
+    combActiva = 'C2+C3';
+    razonCiclo = `${combActiva}: ${c2}/${c3}`;
+  } else {
+    combActiva = 'SIN DATOS';
+    razonCiclo = 'Sin datos de ciclos';
+  }
+
+  return { estadoCiclo, combActiva, razonCiclo, c1, c2, c3, estadoRaw: ci.estado, fBES: ci.fBES };
+}
+
+function decision(b) {
+  if(!b || b.nivel === 0) return {
+    dec:'SIN DATOS', cls:'nd', ico:'◈',
+    sub:'Ingresa números para comenzar',
+    reasons:[], scoreD:null, recD1:null, recD2:null, evitD:null,
+    tablaScore:null, globalScore:0, forBES:'—', combo:'—'
+  };
+
+  // ─── EVALUAR CADA DOCENA ───────────────────────────────
+  const evalDocenas = [0,1,2].map(di => {
+    const eb  = estadoBase(b, di);
+    const ci  = evaluarCiclosPorDocena(b, di);
+    const combo = buscarCombo(eb, ci.estadoCiclo);
+    const rank  = combo ? combo.rank : 99;
+    const p50   = b.p50[di];
+    const aus   = b.v50 - b.f50[di];
+    const ratio = b.v50 > 0 ? 50/b.v50 : 1;
+    const ausN  = Math.round(aus * ratio);
+    const f50N  = Math.round(b.f50[di] * ratio);
+    const f10   = b.f10[di];
+
+    return { di, eb, ci, combo, rank,
+      p50, aus, ausN, f50: b.f50[di], f50N, f10,
+      label: `D${di+1}` };
+  });
+
+  // Ordenar por prioridad (rank menor = mejor)
+  const sorted = [...evalDocenas].sort((a,z) => a.rank - z.rank);
+  const best   = sorted[0];
+  const second = sorted[1];
+  const worst  = sorted[2];
+
+  // ─── MODO 1 DOCENA vs 2 DOCENAS ───────────────────────
+  let recD1, recD2, evitD, dec, cls, ico, forBES, combo, mainCombo;
+
+  if(modoJuego === '1docena') {
+    // Solo la mejor docena
+    recD1 = best.di + 1;
+    recD2 = null;
+    evitD = null;
+    mainCombo = best.combo;
+  } else {
+    // 2 docenas: las 2 mejores
+    recD1 = best.di + 1;
+    recD2 = second.di + 1;
+    evitD = worst.di + 1;
+    mainCombo = best.combo;
+  }
+
+  // ─── DECISIÓN FINAL basada en la mejor combo ──────────
+  if(mainCombo) {
+    dec    = mainCombo.dec;
+    cls    = mainCombo.cls;
+    ico    = mainCombo.ico;
+    forBES = mainCombo.forBES;
+    combo  = `${best.eb}+${best.ci.estadoRaw}`;
+  } else {
+    // Sin combo válida → NO ENTRY
+    dec='NO ENTRY'; cls='noentry'; ico='⛔';
+    forBES='NO ENTRAR';
+    combo=`${best.eb}+${best.ci.estadoRaw}`;
+  }
+
+  // Saturación fuerza NO ENTRY siempre
+  if(best.eb === 'PELIGRO') {
+    dec='NO ENTRY'; cls='noentry'; ico='⛔';
+    forBES='NO ENTRAR · PELIGRO';
+    combo=`PELIGRO+${best.ci.estadoRaw}`;
+  }
+
+  // ─── REASONS (para mostrar en UI) ─────────────────────
+  const reasons = [];
+  evalDocenas.forEach(e => {
+    const color = e.rank <= 2 ? true : e.rank >= 9 ? null : false;
+    reasons.push({
+      t:`D${e.di+1}: ${e.eb} + ${e.ci.estadoRaw} → ${e.combo?e.combo.dec:'NO ENTRY'} (Rank #${e.rank===99?'—':e.rank})`,
+      ok: e.rank <= 5 ? true : e.rank <= 8 ? null : false
+    });
+    reasons.push({
+      t:`  D${e.di+1}: ${e.ci.razonCiclo} · ${e.ci.combActiva} · %50=${(e.p50*100).toFixed(0)}% · Aus${e.ausN}`,
+      ok: null
+    });
+  });
+
+  // ─── TABLA SCORE para UI ───────────────────────────────
+  const tablaScore = evalDocenas.map(e => ({
+    di: e.di,
+    eb: e.eb,
+    cicloEstado: e.ci.estadoRaw,
+    combo: e.combo ? `${e.eb}+${e.ci.estadoRaw}` : '—',
+    rank: e.rank === 99 ? '—' : e.rank,
+    dec: e.combo ? e.combo.dec : 'NO ENTRY',
+    decCls: e.combo ? e.combo.cls : 'noentry',
+    p50: e.p50,
+    ausN: e.ausN,
+    f50N: e.f50N,
+    f10: e.f10,
+    fBES: e.ci.fBES,
+    combActiva: e.ci.combActiva,
+    c1: e.ci.c1, c2: e.ci.c2, c3: e.ci.c3,
+  }));
+
+  const sub = `${combo} · Prioridad #${mainCombo?mainCombo.rank:'—'} · ${forBES}`;
+  const globalScore = mainCombo ? (10 - (mainCombo.rank || 10)) : 0;
+
+  return { dec, cls, ico, sub, reasons, tablaScore, globalScore,
+    recD1, recD2, evitD, forBES, combo,
+    scoreD: evalDocenas.map(e=>({i:e.di, score: e.rank===99?0:(11-e.rank), reasons:[]}))
+  };
 }
 
 // ════ RENDER ════
@@ -117,41 +310,119 @@ function empty(){return`<div style="text-align:center;padding:50px 20px;color:va
 function mwHTML(n,need,col='var(--gold)'){return n<need?`<div class="mwarn"><div class="mwi">📊</div><div class="mwt" style="color:${col}">Análisis más preciso con ${need} tiradas · Ahora: ${n} · Faltan ${need-n}</div><div class="mwp"><div class="mwpt"><div class="mwpf" style="width:${Math.min(100,n/need*100).toFixed(0)}%;background:${col}"></div></div></div></div>`:''}
 
 // ── SEÑAL ──
+const ESTADO_COLOR={IDEAL:'var(--green)',SANA:'var(--c1)',ADVERTENCIA:'var(--gold)',PELIGRO:'var(--red)'};
+const CICLO_ICON={EXPLOSION:'🔥',CRECIENTE:'⚡',REACTIVACION:'↺',ESTABLE:'→',DECRECIENTE:'↘',PELIGROSO:'⚠','SIN DATOS':'—',NORMAL:'→'};
+
+function setModo(m){ modoJuego=m; renderAll(); }
+
 function rSenal(b){
   const el=document.getElementById('c-senal');
-  if(!b){el.innerHTML=`<div style="text-align:center;padding:60px 20px;color:var(--t3)"><div style="font-size:48px;margin-bottom:14px;opacity:.35">⚡</div><div style="font-size:14px">Ingresa los números que van saliendo en la ruleta</div><div style="font-size:11px;margin-top:6px;font-family:var(--fm)">La señal aparece desde el primer número</div></div>`;return;}
+  if(!b){el.innerHTML=`<div style="text-align:center;padding:60px 20px;color:var(--t3)">
+    <div style="font-size:48px;margin-bottom:14px;opacity:.35">⚡</div>
+    <div style="font-size:14px">Ingresa los números que van saliendo en la ruleta</div>
+    <div style="font-size:11px;margin-top:6px;font-family:var(--fm)">La señal aparece desde el primer número</div>
+  </div>`;return;}
   const dg=decision(b);
-  el.innerHTML=mwHTML(b.n,10)+`
+  const nivelPct=[0,20,45,70,100];
+  const mw=b.nivel<4?`<div class="mwarn"><div class="mwi">📊</div>
+    <div class="mwt">${b.n} tiradas · Ciclos más fiables con 30+. Faltan ${Math.max(0,30-b.n)} para análisis completo.</div>
+    <div class="mwp"><div class="mwpt"><div class="mwpf" style="width:${nivelPct[b.nivel]}%"></div></div></div></div>`:'';
+
+  // ── Selector de modo ──
+  const modeHTML=`<div style="display:flex;gap:8px;margin-bottom:14px;align-items:center">
+    <span style="font-size:11px;color:var(--t3);font-family:var(--fm)">Modo:</span>
+    <div style="display:flex;gap:3px;background:var(--bg2);border-radius:8px;padding:3px">
+      <div onclick="setModo('2docenas')" style="padding:6px 14px;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;
+        background:${modoJuego==='2docenas'?'var(--card)':'transparent'};
+        color:${modoJuego==='2docenas'?'var(--c1)':'var(--t2)'}">◉◉ Dos Docenas</div>
+      <div onclick="setModo('1docena')" style="padding:6px 14px;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;
+        background:${modoJuego==='1docena'?'var(--card)':'transparent'};
+        color:${modoJuego==='1docena'?'var(--c1)':'var(--t2)'}">◎ Una Docena</div>
+    </div>
+  </div>`;
+
+  // ── Tabla de docenas con estado+ciclo ──
+  const tablaHTML = dg.tablaScore ? `
+    <div class="card" style="margin-bottom:14px">
+      <div class="ct">ESTADO × CICLO POR DOCENA · Prioridad: C1+C2+C3 › C1+C2 › C2+C3</div>
+      <div style="display:flex;gap:10px;margin-bottom:12px">
+        ${dg.tablaScore.map(s=>{
+          const isRec=s.di+1===dg.recD1||s.di+1===dg.recD2;
+          const ec=ESTADO_COLOR[s.eb]||'var(--t2)';
+          const ci2=CICLO_ICON[s.cicloEstado]||'?';
+          const rankLbl=s.rank==='—'?'—':'#'+s.rank;
+          const rankColor=typeof s.rank==='number'&&s.rank<=2?'var(--green)':typeof s.rank==='number'&&s.rank<=5?'var(--c1)':typeof s.rank==='number'&&s.rank<=8?'var(--gold)':'var(--red)';
+          return`<div style="flex:1;background:var(--bg2);border-radius:10px;padding:14px;text-align:center;
+            border:2px solid ${isRec?ec:'var(--border)'};
+            ${isRec?`box-shadow:0 0 16px ${ec}22`:''};transition:all .3s">
+            <div style="font-size:10px;color:var(--t3);margin-bottom:5px">D${s.di+1} · ${s.di===0?'1-12':s.di===1?'13-24':'25-36'}</div>
+            <div style="font-size:13px;font-weight:800;color:${ec};margin-bottom:3px">${s.eb}</div>
+            <div style="font-size:24px;margin:4px 0">${ci2}</div>
+            <div style="font-size:11px;color:var(--t2);font-family:var(--fm);margin-bottom:8px">${s.cicloEstado}</div>
+            <div style="display:flex;justify-content:center;gap:4px;margin-bottom:8px">
+              ${['C1','C2','C3'].map((cl,xi)=>`<div style="background:var(--bg3);border-radius:4px;padding:2px 5px;
+                font-family:var(--fm);font-size:9px;color:var(--t2)">${cl}:${[s.c1,s.c2,s.c3][xi]}</div>`).join('')}
+            </div>
+            <div style="font-size:9px;color:var(--t3);margin-bottom:6px">${s.combActiva}</div>
+            <div style="font-family:var(--ft);font-size:20px;font-weight:800;color:${rankColor};margin-bottom:6px">${rankLbl}</div>
+            ${sig({t:s.dec,c:s.decCls})}
+            ${isRec?`<div style="margin-top:6px"><span class="sig entry" style="font-size:9px">✓ ELEGIDA</span></div>`:''}
+          </div>`;
+        }).join('')}
+      </div>
+      <div style="padding:10px 14px;background:var(--bg2);border-radius:8px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+        <div>
+          <span style="font-size:10px;color:var(--t3);font-family:var(--fm)">Combinación activa:</span>
+          <span style="font-size:14px;font-weight:700;color:var(--c1);margin-left:8px">${dg.combo||'—'}</span>
+        </div>
+        <span style="font-size:11px;color:var(--t2);font-family:var(--fm)">${dg.forBES}</span>
+      </div>
+    </div>` : '';
+
+  // ── Tabla de referencia de prioridades ──
+  const refHTML=`<div class="card card-last">
+    <div class="ct">TABLA DE PRIORIDADES DEL EXCEL · 10 combinaciones</div>
+    <table class="tbl">
+      <thead><tr><th>#</th><th>Estado Docena</th><th>Ciclo</th><th>Señal</th><th>Fórmula</th></tr></thead>
+      <tbody>
+        ${PRIORIDAD_COMBOS.map(p=>{
+          const activa=dg.combo===p.estado+'+'+p.ciclo;
+          return`<tr style="${activa?'background:rgba(0,212,255,.08);':''}">
+            <td style="color:${p.rank<=2?'var(--green)':p.rank<=5?'var(--c1)':p.rank<=8?'var(--gold)':'var(--red)'};font-weight:800">#${p.rank}</td>
+            <td style="color:${ESTADO_COLOR[p.estado]};font-weight:700">${p.estado}</td>
+            <td style="color:var(--t2)">${CICLO_ICON[p.ciclo]||''} ${p.ciclo}</td>
+            <td>${sig({t:p.dec,c:p.cls})}</td>
+            <td style="color:var(--t3);font-size:10px">${p.forBES}${activa?' ← ACTIVA':''}</td>
+          </tr>`;
+        }).join('')}
+        <tr><td colspan="5" style="color:var(--t3);font-size:10px;padding:8px 10px">Cualquier otra combinación → NO ENTRY ⛔</td></tr>
+      </tbody>
+    </table>
+  </div>`;
+
+  el.innerHTML=mw+modeHTML+`
   <div class="dec-card ${dg.cls}">
     <div class="dec-main">
       <div class="dec-ico">${dg.ico}</div>
       <div>
-        <div class="dec-lbl">SEÑAL PRINCIPAL · NO SATURACIÓN</div>
+        <div class="dec-lbl">SEÑAL PRINCIPAL · NO SATURACIÓN · ${modoJuego==='1docena'?'UNA DOCENA':'DOS DOCENAS'}</div>
         <div class="dec-val ${dg.cls}">${dg.dec}</div>
         <div class="dec-sub">${dg.sub}</div>
         <div class="dec-docs">
-          <div class="dc rec">D${b.iM+1} jugar</div>
-          <div class="dc rec">D${b.iA+1} jugar</div>
-          <div class="dc evit">D${b.iB+1} evitar</div>
+          ${dg.recD1?`<div class="dc rec">D${dg.recD1} jugar</div>`:''}
+          ${dg.recD2?`<div class="dc rec">D${dg.recD2} jugar</div>`:''}
+          ${dg.evitD?`<div class="dc evit">D${dg.evitD} evitar</div>`:''}
         </div>
       </div>
     </div>
-    <div class="dec-reasons">${dg.reasons.map(r=>`<div class="dec-r"><div class="dec-dot" style="background:${r.ok===true?'var(--green)':r.ok===false?'var(--red)':'var(--gold)'}"></div>${r.t}</div>`).join('')}</div>
+    <div class="dec-reasons">${dg.reasons.filter(r=>!r.t.startsWith(' ')).map(r=>`
+      <div class="dec-r">
+        <div class="dec-dot" style="background:${r.ok===true?'var(--green)':r.ok===false?'var(--red)':'var(--gold)'}"></div>
+        ${r.t}
+      </div>`).join('')}</div>
   </div>
-  <div class="g4">
-    <div class="metric mc1"><div class="mlbl">Docena Alta</div><div class="mval" style="color:var(--c1)">D${b.iA+1}</div><div class="msub">${b.f50[b.iA]} hits · ${(b.p50[b.iA]*100).toFixed(1)}%</div></div>
-    <div class="metric mc2"><div class="mlbl">Docena Media</div><div class="mval" style="color:var(--c2)">D${b.iM+1}</div><div class="msub">${b.f50[b.iM]} hits · ${(b.p50[b.iM]*100).toFixed(1)}%</div></div>
-    <div class="metric mg"><div class="mlbl">Docena Baja</div><div class="mval" style="color:var(--gold)">D${b.iB+1}</div><div class="msub">${b.f50[b.iB]} hits · ${(b.p50[b.iB]*100).toFixed(1)}%</div></div>
-    <div class="metric ${b.saturada?'mred':'mgreen'}"><div class="mlbl">Saturación</div><div class="mval" style="color:${b.saturada?'var(--red)':'var(--green)'}">${b.saturada?'SÍ':'NO'}</div><div class="msub">${b.saturada?'Sobre umbral':'Sistema estable'}</div></div>
-  </div>
-  <div class="card card-last">
-    <div class="ct">10 SALIENTES · ÚLTIMAS 10 TIRADAS</div>
-    <table class="tbl"><thead><tr><th>Categoría</th><th>Docena</th><th>Cantidad</th><th>Señal</th><th>Regla Excel</th></tr></thead><tbody>
-      <tr><td>Alta</td><td class="hl">D${b.iA+1}</td><td class="${b.f10[b.iA]>5?'rt':b.f10[b.iA]>=3?'gt':''}">${b.f10[b.iA]}</td><td>${sig(b.f10[b.iA]>5?{t:'NO ENTRY',c:'noentry'}:b.f10[b.iA]>=3?{t:'ENTRY',c:'entry'}:{t:'BAJO',c:'esperar'})}</td><td style="color:var(--t3)">ENTRY 3-5 · NO si >5</td></tr>
-      <tr><td>Media</td><td class="hl">D${b.iM+1}</td><td class="${b.f10[b.iM]>=2&&b.f10[b.iM]<=4?'gt':''}">${b.f10[b.iM]}</td><td>${sig(b.f10[b.iM]>=2&&b.f10[b.iM]<=4?{t:'ENTRY',c:'entry'}:{t:'REVISAR',c:'esperar'})}</td><td style="color:var(--t3)">ENTRY 2-4</td></tr>
-      <tr><td>Baja</td><td class="hl">D${b.iB+1}</td><td class="${b.f10[b.iB]<=2?'gt':''}">${b.f10[b.iB]}</td><td>${sig(b.f10[b.iB]<=2?{t:'ENTRY',c:'entry'}:{t:'NO ENTRY',c:'noentry'})}</td><td style="color:var(--t3)">ENTRY ≤2</td></tr>
-    </tbody></table>
-  </div>`;}
+  ${tablaHTML}${refHTML}`;
+}
 
 // ── FRECUENCIAS ──
 function rFrec(b){
@@ -482,8 +753,8 @@ function addN(){
   // 1) Capturar señal ANTES de agregar el número
   const bPrev = calc();
   const dgPrev = bPrev ? decision(bPrev) : null;
-  const recD1 = bPrev ? bPrev.iA+1 : null; // docena alta
-  const recD2 = bPrev ? bPrev.iM+1 : null; // docena media
+  const recD1 = dgPrev?.recD1 ?? (bPrev ? bPrev.iA+1 : null);
+  const recD2 = dgPrev?.recD2 ?? (bPrev ? bPrev.iM+1 : null);
 
   // 2) Agregar número
   const idx = T.length;
@@ -517,8 +788,8 @@ function addN(){
 function addD(n){
   const bPrev = calc();
   const dgPrev = bPrev ? decision(bPrev) : null;
-  const recD1 = bPrev ? bPrev.iA+1 : null;
-  const recD2 = bPrev ? bPrev.iM+1 : null;
+  const recD1 = dgPrev?.recD1 ?? (bPrev ? bPrev.iA+1 : null);
+  const recD2 = dgPrev?.recD2 ?? (bPrev ? bPrev.iM+1 : null);
   const idx = T.length;
   T.push(n);
   const doc = n===0?0:n<=12?1:n<=24?2:3;
@@ -539,8 +810,8 @@ function paste(){
   nums.forEach(n=>{
     const bPrev=calc();
     const dgPrev=bPrev?decision(bPrev):null;
-    const recD1=bPrev?bPrev.iA+1:null;
-    const recD2=bPrev?bPrev.iM+1:null;
+    const recD1=dgPrev?.recD1??(bPrev?bPrev.iA+1:null);
+    const recD2=dgPrev?.recD2??(bPrev?bPrev.iM+1:null);
     const idx=T.length;T.push(n);
     const doc=n===0?0:n<=12?1:n<=24?2:3;
     const ts=now.toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
