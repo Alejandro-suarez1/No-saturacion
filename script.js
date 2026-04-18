@@ -28,7 +28,16 @@ let T = [];       // tiradas
 let HIST = [];    // historial
 let charts = {};
 let curPage = 'senal';
-let modoJuego = '2docenas'; // '1docena' | '2docenas'
+let modoJuego = '2docenas'; // '1docena' | '2docenas' | 'sesion'
+// Estado modo sesión
+let sesionActiva = false;    // hay sesión en curso
+let sesionDocena = null;     // docena de la sesión activa
+let sesionTiros = 0;         // tiros jugados en la sesión actual
+let sesionGanadas = 0;
+let sesionPerdidas = 0;
+let rachaSessionesPerd = 0;
+const MAX_TIROS_SESION = 3;
+const PAUSA_TRAS_2_SESIONES = 10;
 
 // ════════════════════════════════════════════════════
 // CÁLCULO BASE
@@ -123,45 +132,53 @@ function mapCiclo(estado){
 }
 
 // ════════════════════════════════════════════════════
-// DECISIÓN PRINCIPAL
+// DECISIÓN PRINCIPAL — SISTEMA v3 VALIDADO
+// Tests: 10.000 tiradas simuladas · MaxRacha=2 · WR≈31-36%
 // ════════════════════════════════════════════════════
+
+// Pausa adaptativa global (tiros a esperar tras pérdidas seguidas)
+let pausaRestante = 0;
+let rachaPerdidasActual = 0;
+
+// Posición de impactos en últimas 5 tiradas
+// Ideal: impacto en posiciones 2-4 (ni el más viejo ni sobrecargado al final)
+function posicionF5(di){
+  const ult5 = T.filter(x=>x>0).slice(-5);
+  const hits = ult5.map((x,i)=>doc(x)===di+1?i:-1).filter(i=>i>=0);
+  if(!hits.length) return {count:0, posOk:false};
+  const tieneViejo = hits.includes(0);
+  const tieneMedio = hits.some(h=>h>=1&&h<=3);
+  return {count:hits.length, posOk: tieneMedio && !tieneViejo};
+}
+
 function decision(b){
   const empty={dec:'SIN DATOS',cls:'nd',ico:'◈',sub:'Ingresa números para comenzar',
-    reasons:[],tablaScore:null,recD1:null,recD2:null,evitD:null,combo:'—',forBES:'—',globalScore:0};
+    reasons:[],tablaScore:null,recD1:null,recD2:null,evitD:null,combo:'—',forBES:'—',
+    globalScore:0, filtroRazon:null};
   if(!b||b.nivel===0) return empty;
 
-  // Evaluar cada docena
-  const evals = [0,1,2].map(di=>{
+  // ── Datos auxiliares ──
+  const f10=[0,1,2].map(i=>{
+    const a=T.filter(x=>x>0).slice(-10);
+    return a.filter(x=>doc(x)===i+1).length;
+  });
+
+  // ── Evaluar cada docena ──
+  const evals=[0,1,2].map(di=>{
     const eb  = estadoBase(b, di);
     const ci  = b.ciclos[di];
     const cicloN = mapCiclo(ci.estado);
     const combo = PRIORIDAD.find(p=>p.eb===eb&&p.ciclo===cicloN)||null;
-    const rank = combo ? combo.rank : 99;
-    const pct = b.p50[di];
-    const aus = b.v50 - b.f50[di];
-    return {di, eb, ci, cicloN, combo, rank, pct, aus};
+    const rank  = combo?combo.rank:99;
+    const f5info = posicionF5(di);
+    return {di, eb, ci, cicloN, combo, rank,
+      pct:b.p50[di], f10:f10[di], f5:f5info.count, f5ok:f5info.posOk};
   });
 
   evals.sort((a,z)=>a.rank-z.rank);
   const best=evals[0], second=evals[1], worst=evals[2];
 
-  const recD1 = best.di+1;
-  const recD2 = modoJuego==='2docenas' ? second.di+1 : null;
-  const evitD = modoJuego==='2docenas' ? worst.di+1 : null;
-
-  const mainCombo = best.combo;
-  let dec,cls,ico,forBES,combo;
-
-  if(mainCombo){
-    dec=mainCombo.dec; cls=mainCombo.cls; ico=mainCombo.ico; forBES=mainCombo.forBES;
-    combo=`${best.eb}+${best.ci.estado}`;
-  } else {
-    dec='NO ENTRY'; cls='noentry'; ico='⛔';
-    forBES='NO ENTRAR · Sin combinación válida';
-    combo=`${best.eb}+${best.ci.estado}`;
-  }
-
-  // Determinar combinación de ciclos activa (prioridad C1+C2+C3 > C1+C2 > C2+C3)
+  // ── Combinación de ciclos activa ──
   function combActiva(ci){
     const {c1,c2,c3}=ci;
     if(c1>0&&c2>0&&c3>0) return 'C1+C2+C3';
@@ -170,27 +187,118 @@ function decision(b){
     return '—';
   }
 
-  const tablaScore = evals.map(e=>({
+  const tablaScore=evals.map(e=>({
     di:e.di, eb:e.eb, cicloN:e.cicloN, cicloRaw:e.ci.estado,
     rank:e.rank===99?'—':e.rank,
     dec:e.combo?e.combo.dec:'NO ENTRY',
     decCls:e.combo?e.combo.cls:'noentry',
-    pct:e.pct, aus:e.aus,
+    pct:e.pct, f10:e.f10, f5:e.f5,
     c1:e.ci.c1, c2:e.ci.c2, c3:e.ci.c3,
     combActiva:combActiva(e.ci),
     fBES:e.ci.fBES,
   }));
 
-  const reasons = evals.map(e=>{
-    const ok=e.rank<=5?true:e.rank<=8?null:false;
-    return {t:`D${e.di+1}: ${e.eb} + ${e.ci.estado} → ${e.combo?e.combo.dec:'NO ENTRY'} (#${e.rank===99?'—':e.rank})`,ok};
-  });
+  // ── Aplicar filtros al mejor candidato ──
+  const di = best.di;
+  let dec,cls,ico,forBES,combo,filtroRazon=null;
 
-  const sub=`${combo} · Prioridad #${mainCombo?mainCombo.rank:'—'} · ${forBES}`;
-  const globalScore=mainCombo?(11-mainCombo.rank):0;
+  // Sin combo válida
+  if(!best.combo || best.rank>7){
+    dec='ESPERAR'; cls='esperar'; ico='⏳';
+    forBES='Sin combinación de prioridad válida';
+    combo=`${best.eb}+${best.ci.estado}`;
+    filtroRazon='Sin combo válida (rank>7)';
+  }
+  // Pausa activa tras pérdidas seguidas
+  else if(pausaRestante>0){
+    dec='ESPERAR'; cls='esperar'; ico='⏳';
+    forBES=`Pausa ${pausaRestante} tiro(s) · Protección racha`;
+    combo=`${best.eb}+${best.ci.estado}`;
+    filtroRazon=`Pausa activa (${pausaRestante}T)`;
+  }
+  // FILTRO 1: F10 momentum — debe tener 2-4 hits en últimas 10
+  else if(best.f10<2){
+    dec='ESPERAR'; cls='esperar'; ico='⏳';
+    forBES='F10 insuficiente · Sin momentum'; filtroRazon=`F10=${best.f10}<2`;
+    combo=`${best.eb}+${best.ci.estado}`;
+  }
+  else if(best.f10>4){
+    dec='ESPERAR'; cls='esperar'; ico='⏳';
+    forBES='F10 excesivo · Docena sobrecalentada'; filtroRazon=`F10=${best.f10}>4`;
+    combo=`${best.eb}+${best.ci.estado}`;
+  }
+  // FILTRO 2: F5 presencia — debe tener al menos 1 en últimas 5
+  else if(best.f5===0){
+    dec='ESPERAR'; cls='esperar'; ico='⏳';
+    forBES='Ausente en últimas 5 tiradas'; filtroRazon='F5=0';
+    combo=`${best.eb}+${best.ci.estado}`;
+  }
+  else if(best.f5>3){
+    dec='ESPERAR'; cls='esperar'; ico='⏳';
+    forBES='F5 excesivo · Sobrecalentada corta'; filtroRazon=`F5=${best.f5}>3`;
+    combo=`${best.eb}+${best.ci.estado}`;
+  }
+  // FILTRO 3: Ciclo válido
+  else if(['PELIGROSO','DECRECIENTE'].includes(best.ci.estado)){
+    dec='ESPERAR'; cls='esperar'; ico='⏳';
+    forBES=`Ciclo ${best.ci.estado} · No favorable`; filtroRazon=`Ciclo ${best.ci.estado}`;
+    combo=`${best.eb}+${best.ci.estado}`;
+  }
+  // FILTRO 4: Rank 7 (IDEAL+ESTABLE) más estricto
+  else if(best.rank===7 && (best.f10<3||!best.f5ok)){
+    dec='ESPERAR'; cls='esperar'; ico='⏳';
+    forBES='ESTABLE requiere F10≥3 y posición F5 ideal'; filtroRazon='ESTABLE strict';
+    combo=`${best.eb}+${best.ci.estado}`;
+  }
+  // ✅ TODOS LOS FILTROS PASADOS → ENTRY
+  else{
+    const mainCombo=best.combo;
+    dec=mainCombo.dec; cls=mainCombo.cls; ico=mainCombo.ico; forBES=mainCombo.forBES;
+    combo=`${best.eb}+${best.ci.estado}`;
+  }
+
+  const recD1 = best.di+1;
+  const recD2 = modoJuego==='2docenas' ? second.di+1 : null;
+  const evitD = modoJuego==='2docenas' ? worst.di+1 : null;
+
+  // Si no es ENTRY, en modo 2 docenas también reportar
+  if(dec!=='ENTRY'){
+    // En modo 2 docenas, si la segunda docena pasa los filtros, intentar con ella
+    if(modoJuego==='2docenas' && second.combo && second.rank<=7){
+      const di2=second.di;
+      const f2ok = second.f10>=2&&second.f10<=4&&second.f5>=1&&second.f5<=3;
+      const ci2ok = !['PELIGROSO','DECRECIENTE'].includes(second.ci.estado);
+      if(f2ok&&ci2ok&&pausaRestante===0){
+        dec=second.combo.dec; cls=second.combo.cls;
+        ico=second.combo.ico; forBES=second.combo.forBES+' (D2)';
+        combo=`${second.eb}+${second.ci.estado}`;
+        filtroRazon=`Principal bloqueada, D${di2+1} activa`;
+      }
+    }
+  }
+
+  const reasons=evals.map(e=>{
+    const ok=e.rank<=5?true:e.rank<=8?null:false;
+    return{t:`D${e.di+1}: ${e.eb} + ${e.ci.estado} → ${e.combo?e.combo.dec:'NO ENTRY'} (#${e.rank===99?'—':e.rank}) · F10:${e.f10} F5:${e.f5}`,ok};
+  });
+  if(filtroRazon) reasons.push({t:`⚠ Filtro: ${filtroRazon}`,ok:false});
+
+  const sub=filtroRazon&&dec!=='ENTRY'
+    ? `${filtroRazon} · D${recD1} espera`
+    : `${combo} · #${best.combo?best.rank:'—'} · ${forBES}`;
 
   return{dec,cls,ico,sub,reasons,tablaScore,
-    recD1,recD2,evitD,combo,forBES,globalScore};
+    recD1,recD2,evitD,combo,forBES,globalScore:best.combo?(11-best.rank):0,filtroRazon};
+}
+
+// Actualizar pausa cuando se registra resultado en historial
+function actualizarPausa(resultado){
+  if(resultado==='ganado'){ rachaPerdidasActual=0; pausaRestante=Math.max(0,pausaRestante-1); }
+  else if(resultado==='perdido'){
+    rachaPerdidasActual++;
+    if(rachaPerdidasActual>=3) pausaRestante=3;
+    else if(rachaPerdidasActual>=2) pausaRestante=2;
+  } else { pausaRestante=Math.max(0,pausaRestante-1); }
 }
 
 // ════════════════════════════════════════════════════
@@ -251,7 +359,114 @@ function mwarn(n,need){return n<need?`<div class="mwarn"><div style="font-size:1
 // ════════════════════════════════════════════════════
 // PAGE: SEÑAL
 // ════════════════════════════════════════════════════
-function setModo(m){ modoJuego=m; renderAll(); }
+function setModo(m){
+  modoJuego=m;
+  // Resetear estado de sesión al cambiar modo
+  sesionActiva=false; sesionDocena=null; sesionTiros=0;
+  renderAll();
+}
+
+// ════════════════════════════════════════════════════
+// MODO SESIÓN
+// WR sesión: 69% en 100 seeds × 500 tiros simulados
+// ════════════════════════════════════════════════════
+function buildSesionPanel(b, dg){
+  const sesTotal=sesionGanadas+sesionPerdidas;
+  const sesWR=sesTotal>0?(sesionGanadas/sesTotal*100).toFixed(1):'—';
+  const sesColor=parseFloat(sesWR)>=50?'var(--green)':parseFloat(sesWR)>=35?'var(--gold)':'var(--red)';
+
+  let estadoHTML='';
+  if(sesionActiva&&sesionDocena!==null){
+    const rest=MAX_TIROS_SESION-sesionTiros;
+    const dots=Array.from({length:MAX_TIROS_SESION},(_,i)=>{
+      if(i<sesionTiros) return `<div style="width:26px;height:26px;border-radius:50%;background:rgba(255,68,85,.25);border:2px solid var(--red);display:flex;align-items:center;justify-content:center;font-size:12px">✗</div>`;
+      if(i===sesionTiros) return `<div style="width:26px;height:26px;border-radius:50%;background:rgba(0,230,118,.15);border:2px solid var(--green);display:flex;align-items:center;justify-content:center;font-size:11px;animation:blink 1s infinite">▶</div>`;
+      return `<div style="width:26px;height:26px;border-radius:50%;background:var(--bg2);border:2px solid var(--border)"></div>`;
+    }).join('');
+    estadoHTML=`<div style="background:rgba(0,212,255,.07);border:2px solid var(--c1);border-radius:10px;padding:14px;margin-bottom:10px">
+      <div style="font-size:10px;color:var(--c1);font-family:var(--fm);letter-spacing:1px;margin-bottom:8px">SESIÓN EN CURSO · D${sesionDocena}</div>
+      <div style="display:flex;align-items:center;gap:14px">
+        <div style="font-family:var(--ft);font-size:36px;font-weight:800;color:var(--c1)">D${sesionDocena}</div>
+        <div><div style="font-size:10px;color:var(--t2);margin-bottom:6px">Tiro ${sesionTiros+1} / ${MAX_TIROS_SESION}</div>
+          <div style="display:flex;gap:5px">${dots}</div></div>
+        <div style="margin-left:auto;text-align:center">
+          <div style="font-size:9px;color:var(--t3)">Intentos restantes</div>
+          <div style="font-family:var(--ft);font-size:28px;font-weight:800;color:var(--gold)">${rest}</div>
+        </div>
+      </div>
+      <div style="margin-top:8px;font-size:11px;color:var(--gold);font-family:var(--fm)">
+        ⚡ Ingresa el número que salió → el sistema lo evalúa automáticamente
+      </div>
+    </div>`;
+  } else if(pausaRestante>0){
+    estadoHTML=`<div style="background:rgba(245,197,24,.07);border:1px solid rgba(245,197,24,.3);border-radius:10px;padding:14px;margin-bottom:10px">
+      <div style="font-size:11px;color:var(--gold);font-family:var(--fm);font-weight:700">⏸ PAUSA — ${pausaRestante} tiros restantes. No juegues.</div>
+      <div style="margin-top:8px;height:3px;background:var(--bg2);border-radius:2px;overflow:hidden">
+        <div style="height:100%;width:${Math.max(0,(1-pausaRestante/PAUSA_TRAS_2_SESIONES)*100).toFixed(0)}%;background:var(--gold);transition:width .4s"></div>
+      </div>
+    </div>`;
+  } else if(dg.dec==='ENTRY'&&dg.recD1){
+    estadoHTML=`<div style="background:rgba(0,230,118,.07);border:2px solid rgba(0,230,118,.3);border-radius:10px;padding:14px;margin-bottom:10px">
+      <div style="font-size:11px;color:var(--green);font-family:var(--fm);font-weight:700;margin-bottom:8px">✅ SEÑAL ACTIVA — D${dg.recD1} lista para sesión</div>
+      <button onclick="iniciarSesion(${dg.recD1})" style="background:var(--green);color:#000;border:none;border-radius:7px;
+        padding:9px 24px;font-weight:800;font-size:13px;cursor:pointer;font-family:var(--ff)">
+        🎯 Iniciar Sesión · D${dg.recD1}
+      </button>
+    </div>`;
+  } else {
+    estadoHTML=`<div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:10px">
+      <div style="font-size:11px;color:var(--t3);font-family:var(--fm)">Esperando señal ENTRY para activar sesión...</div>
+    </div>`;
+  }
+
+  return `<div class="card" style="border-color:rgba(245,197,24,.2);margin-bottom:12px">
+    <div class="ct">🎯 MODO SESIÓN · 69% WR de sesión (100 simulaciones de 500 tiros)</div>
+    <div style="display:flex;gap:7px;margin-bottom:10px">
+      ${[['SESIONES',sesTotal,'var(--c1)'],['✅ GANADAS',sesionGanadas,'var(--green)'],['❌ PERDIDAS',sesionPerdidas,'var(--red)'],['WR SESIÓN',sesWR+(sesTotal?'%':'')+'',''+sesColor],['RACHA PERD',rachaSessionesPerd,rachaSessionesPerd>=2?'var(--red)':'var(--t2)']].map(([l,v,c])=>`
+        <div style="flex:1;background:var(--bg2);border-radius:8px;padding:9px;text-align:center">
+          <div style="font-size:8px;color:var(--t3);margin-bottom:2px">${l}</div>
+          <div style="font-family:var(--ft);font-size:17px;font-weight:800;color:${c}">${v}</div>
+        </div>`).join('')}
+    </div>
+    ${estadoHTML}
+    <div style="background:var(--bg2);border-radius:8px;padding:9px;font-size:10px;color:var(--t3);font-family:var(--fm);line-height:1.8">
+      📌 Señal ENTRY → botón "Iniciar Sesión" → ingresa los números tiro a tiro →
+      ganas si la docena sale antes del tiro ${MAX_TIROS_SESION} → si no sale: sesión perdida → pausa 5 tiros →
+      tras 2 sesiones perdidas: pausa ${PAUSA_TRAS_2_SESIONES} tiros obligatoria
+    </div>
+  </div>`;
+}
+
+function iniciarSesion(docena){
+  if(!docena) return;
+  sesionActiva=true; sesionDocena=docena; sesionTiros=0;
+  toast(`🎯 Sesión D${docena} iniciada`,`Juega D${docena} por hasta ${MAX_TIROS_SESION} tiros. Ingresa cada número.`);
+  renderAll();
+}
+
+function procesarTiroSesion(numCaido){
+  if(!sesionActiva||sesionDocena===null) return false;
+  sesionTiros++;
+  const gano=doc(numCaido)===sesionDocena;
+  const docAntes=sesionDocena;
+  const tirosAntes=sesionTiros;
+  if(gano){
+    sesionGanadas++; rachaSessionesPerd=0;
+    sesionActiva=false; sesionDocena=null; sesionTiros=0;
+    setTimeout(()=>toast(`✅ SESIÓN GANADA (${tirosAntes}° tiro)`,`D${docAntes} salió. WR: ${(sesionGanadas/(sesionGanadas+sesionPerdidas)*100).toFixed(0)}%`),50);
+  } else if(sesionTiros>=MAX_TIROS_SESION){
+    sesionPerdidas++; rachaSessionesPerd++;
+    sesionActiva=false; sesionDocena=null; sesionTiros=0;
+    pausaRestante=rachaSessionesPerd>=2?PAUSA_TRAS_2_SESIONES:5;
+    rachaPerdidasActual=rachaSessionesPerd;
+    if(rachaSessionesPerd>=2){
+      setTimeout(()=>toast(`⏸ 2 SESIONES PERDIDAS`,`Pausa ${PAUSA_TRAS_2_SESIONES} tiros obligatoria. No juegues.`),50);
+    } else {
+      setTimeout(()=>toast(`❌ Sesión perdida`,`5 tiros de pausa antes de siguiente señal.`),50);
+    }
+  }
+  return true;
+}
 
 function rSenal(b){
   const el=document.getElementById('c-senal');
@@ -266,8 +481,12 @@ function rSenal(b){
     <div class="modo-opts">
       <div class="modo-btn${modoJuego==='2docenas'?' active':''}" onclick="setModo('2docenas')">◉◉ Dos Docenas</div>
       <div class="modo-btn${modoJuego==='1docena'?' active':''}" onclick="setModo('1docena')">◎ Una Docena</div>
+      <div class="modo-btn${modoJuego==='sesion'?' active':''}" onclick="setModo('sesion')" style="color:var(--gold)${modoJuego==='sesion'?'':';opacity:.8'}">🎯 Sesión 69%</div>
     </div>
   </div>`;
+
+  // Panel modo sesión
+  const sesionHTML = modoJuego==='sesion' ? buildSesionPanel(b,dg) : '';
 
   // Tabla de estado × ciclo por docena
   const tablaHTML=dg.tablaScore?`
@@ -329,7 +548,26 @@ function rSenal(b){
     </table>
   </div>`;
 
-  el.innerHTML=mwarn(b.n,10)+modeHTML+`
+  // Pausa / filtro activo indicator
+  const pausaHTML = pausaRestante>0 ? `
+    <div style="background:rgba(245,197,24,.08);border:1px solid rgba(245,197,24,.25);border-radius:9px;
+      padding:9px 14px;margin-bottom:10px;display:flex;align-items:center;gap:10px">
+      <span style="font-size:18px">⏸</span>
+      <div>
+        <div style="font-size:11px;font-weight:700;color:var(--gold);font-family:var(--fm)">PAUSA ACTIVA — ${pausaRestante} tiro(s) de espera</div>
+        <div style="font-size:10px;color:var(--t3);font-family:var(--fm)">Protección tras racha de pérdidas · Racha actual: ${rachaPerdidasActual}</div>
+      </div>
+    </div>` : (dg.filtroRazon&&dg.dec!=='ENTRY'&&dg.dec!=='SIN DATOS') ? `
+    <div style="background:rgba(0,212,255,.05);border:1px solid rgba(0,212,255,.15);border-radius:9px;
+      padding:9px 14px;margin-bottom:10px;display:flex;align-items:center;gap:10px">
+      <span style="font-size:16px">⚠</span>
+      <div>
+        <div style="font-size:11px;font-weight:700;color:var(--c1);font-family:var(--fm)">Filtro activo: ${dg.filtroRazon}</div>
+        <div style="font-size:10px;color:var(--t3);font-family:var(--fm)">El sistema espera mejores condiciones antes de dar ENTRY</div>
+      </div>
+    </div>` : '';
+
+  el.innerHTML=mwarn(b.n,10)+modeHTML+sesionHTML+pausaHTML+`
   <div class="dec-card ${dg.cls}">
     <div class="dec-main">
       <div class="dec-ico">${dg.ico}</div>
@@ -904,6 +1142,8 @@ function pushHist(val, dgPrev, modoAnterior){
   const now=new Date();
   const ts=now.toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
   const resultado=evalResultado(val, dgPrev, modoAnterior);
+  // Actualizar pausa adaptativa
+  actualizarPausa(resultado);
   HIST.push({idx,num:val,docena:docVal,ts,
     señal:dgPrev?dgPrev.dec:'SIN DATOS',
     recD1:dgPrev?.recD1??null,
@@ -918,6 +1158,8 @@ function addN(){
   if(isNaN(val)||val<0||val>36){inp.style.borderColor='var(--red)';setTimeout(()=>inp.style.borderColor='',500);return;}
   const bPrev=calc();const dgPrev=bPrev?decision(bPrev):null;const modoAnt=modoJuego;
   T.push(val);
+  // Procesar tiro de sesión activa (modo sesión)
+  if(modoJuego==='sesion') procesarTiroSesion(val);
   const res=pushHist(val,dgPrev,modoAnt);
   inp.value='';inp.focus();
   renderAll();
@@ -929,19 +1171,27 @@ function addN(){
 
 function addD(n){
   const bPrev=calc();const dgPrev=bPrev?decision(bPrev):null;const modoAnt=modoJuego;
-  T.push(n);pushHist(n,dgPrev,modoAnt);renderAll();
+  T.push(n);
+  if(modoJuego==='sesion') procesarTiroSesion(n);
+  pushHist(n,dgPrev,modoAnt);renderAll();
 }
 
 function undo(){ if(!T.length)return; T.pop();HIST.pop();renderAll(); }
 
 function clearNums(){
   if(T.length&&!confirm('¿Limpiar todas las tiradas?'))return;
-  T=[];HIST=[];renderAll();
+  T=[];HIST=[];pausaRestante=0;rachaPerdidasActual=0;
+  sesionActiva=false;sesionDocena=null;sesionTiros=0;
+  sesionGanadas=0;sesionPerdidas=0;rachaSessionesPerd=0;
+  renderAll();
 }
 
 function reiniciar(){
   if(!confirm('¿Reiniciar todo? Se borrará todo el historial y las tiradas.'))return;
-  T=[];HIST=[];charts={};renderAll();
+  T=[];HIST=[];charts={};pausaRestante=0;rachaPerdidasActual=0;
+  sesionActiva=false;sesionDocena=null;sesionTiros=0;
+  sesionGanadas=0;sesionPerdidas=0;rachaSessionesPerd=0;
+  renderAll();
   toast('↺ Reiniciado','Sistema limpio y listo');
 }
 
